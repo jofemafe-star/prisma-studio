@@ -2,6 +2,7 @@
 import { fb, configured } from './firebase.js';
 import { compute, flowSvg, emptyFlow, listOf, num } from './flow.js';
 import { download, svgBlob, svgToPng, docxBlob, locOf } from './export.js';
+import { initExtraction } from './extract.js';
 
 /* ============================== utilidades ============================== */
 const $ = (s, r = document) => r.querySelector(s);
@@ -70,6 +71,9 @@ function debounced(key, fn, ms = 700) {
 function flushAll() {
   for (const [, v] of [...timers]) { clearTimeout(v.t); v.run(); }
 }
+
+/* módulo de extracción de datos (fase D) */
+const ex = initExtraction({ S, fb, $, $$, esc, toast, canEdit, newId, nest, setSaving, debounced, pend, download, myName, slug, fetchImpl: (...a) => fetch(...a) });
 
 /* ============================== plantillas ============================== */
 async function loadTemplates() {
@@ -199,18 +203,21 @@ function closeProject() {
   S.unsubProj = [];
   S.cur = null;
   for (const k of Object.keys(pend)) delete pend[k];
+  ex.reset();
 }
 
 async function openProject(pid) {
   if (S.cur?.id === pid) return;
   closeProject();
-  const cur = (S.cur = { id: pid, data: null, checklist: {}, flow: emptyFlow(), invites: [], tpl: null, shell: false, loading: false, invSub: false, lastRole: null });
+  const cur = (S.cur = { id: pid, data: null, checklist: {}, flow: emptyFlow(), studies: {}, invites: [], tpl: null, shell: false, loading: false, invSub: false, lastRole: null });
   S.tab = 'checklist';
   S.filter = 'all';
   root.innerHTML = `${topbar()}<main class="wrap"><p class="muted">Cargando proyecto…</p></main>`;
 
   const fail = (e) => {
     if (S.cur !== cur) return;
+    S.unsubProj.forEach((u) => u()); // dejar de escuchar: evita avisos repetidos
+    S.unsubProj = [];
     const msg = e?.code === 'permission-denied' ? 'No tienes acceso a este proyecto (o ya no eres miembro).' : e?.message || 'No existe.';
     root.innerHTML = `${topbar()}<main class="wrap"><div class="card"><h2>No se puede abrir el proyecto</h2><p>${esc(msg)}</p><a href="#/">← Volver a mis proyectos</a></div></main>`;
   };
@@ -230,7 +237,7 @@ async function openProject(pid) {
       if (S.cur !== cur) return;
       cur.shell = true;
       renderShell();
-      subscribeChildren(cur);
+      subscribeChildren(cur, fail);
     } else {
       onProjectChanged();
     }
@@ -238,9 +245,13 @@ async function openProject(pid) {
   }, fail));
 }
 
-function subscribeChildren(cur) {
+function subscribeChildren(cur, fail) {
   const pid = cur.id;
-  const errH = (e) => { if (S.cur === cur) toast('Error de sincronización: ' + (e.message || e.code), 'err'); };
+  const errH = (e) => {
+    if (S.cur !== cur) return;
+    if (e?.code === 'permission-denied') return fail(e); // perdió el acceso: pantalla clara, sin avisos técnicos
+    toast('Error de sincronización: ' + (e.message || e.code), 'err');
+  };
   S.unsubProj.push(fb.onSnapshot(fb.collection(fb.db, 'projects', pid, 'checklist'), (snap) => {
     if (S.cur !== cur) return;
     snap.docs.forEach((d) => { cur.checklist[d.id] = d.data(); });
@@ -258,6 +269,7 @@ function subscribeChildren(cur) {
     for (const p of Object.values(pend)) if (p.kind === 'flow') setIn(cur.flow, p.path, p.value);
     if (S.tab === 'flow') syncFlow();
   }, errH));
+  ex.subscribe(cur, errH);
 }
 
 function maybeSubscribeInvites(cur) {
@@ -291,7 +303,7 @@ function updateHeader() {
 }
 
 function renderShell() {
-  const tabs = [['checklist', 'Lista de verificación'], ['flow', 'Diagrama de flujo'], ['members', 'Miembros'], ['export', 'Exportar']];
+  const tabs = [['checklist', 'Lista de verificación'], ['flow', 'Diagrama de flujo'], ['extract', 'Extracción'], ['compare', 'Comparación'], ['members', 'Miembros'], ['export', 'Exportar']];
   root.innerHTML = `${topbar()}<main class="wrap">
     <div class="phead"><a href="#/" class="link">← Proyectos</a><h1 id="p-title"></h1><span id="p-role" class="badge"></span>
       <span class="grow"></span><span id="savestate" class="muted sm"></span>
@@ -307,7 +319,7 @@ function renderShell() {
 function renderTab() {
   if (!S.cur?.shell) return;
   $$('.tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === S.tab));
-  ({ checklist: renderChecklist, flow: renderFlow, members: renderMembers, export: renderExport })[S.tab]();
+  ({ checklist: renderChecklist, flow: renderFlow, extract: ex.renderExtraction, compare: ex.renderCompare, members: renderMembers, export: renderExport })[S.tab]();
 }
 
 /* ----------------------------- Lista de verificación ---------------------------- */
@@ -553,7 +565,7 @@ async function delProject() {
   closeProject();
   root.innerHTML = `${topbar()}<main class="wrap"><p class="muted">Borrando proyecto…</p></main>`;
   try {
-    for (const sub of ['checklist', 'flow']) {
+    for (const sub of ['checklist', 'flow', 'studies']) {
       const snap = await fb.getDocs(fb.collection(fb.db, 'projects', pid, sub));
       await Promise.all(snap.docs.map((x) => fb.deleteDoc(x.ref)));
     }
@@ -607,7 +619,7 @@ async function doExport(kind) {
   if (kind === 'png') { const p = await svgToPng(svg, 2); return download(p.blob, `${base}_flujo-PRISMA.png`); }
   if (kind === 'pdf') return printReport();
   if (kind === 'json') {
-    const data = { exportedAt: new Date().toISOString(), project: { title: d.title, guide: d.guide, meta: d.meta || {} }, checklist: cur.checklist, flow: cur.flow };
+    const data = { exportedAt: new Date().toISOString(), project: { title: d.title, guide: d.guide, meta: d.meta || {} }, checklist: cur.checklist, flow: cur.flow, studies: cur.studies };
     return download(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }), `${base}_backup.json`);
   }
   // docx
@@ -715,6 +727,7 @@ const acts = {
   },
   'del-project': delProject,
   export: (el) => doExport(el.dataset.kind),
+  ...ex.actions,
 };
 
 async function emailAuth(mode) {
