@@ -288,7 +288,7 @@ function onProjectChanged() {
   const r = role();
   if (r !== cur.lastRole) { cur.lastRole = r; maybeSubscribeInvites(cur); renderTab(); return; }
   if (S.tab === 'members') renderMembers();
-  if (S.tab === 'export') {
+  if (S.tab === 'export' || S.tab === 'extract') {
     $$('[data-meta]').forEach((i) => {
       if (document.activeElement === i) return;
       i.value = i.dataset.meta === 'title' ? cur.data.title : cur.data.meta?.[i.dataset.meta] || '';

@@ -76,12 +76,13 @@ export function initExtraction(ctx) {
       const ctl = new AbortController();
       const timer = setTimeout(() => ctl.abort(), 8 * 60 * 1000);
       let out;
-      try { out = await callClaude({ apiKey: apiKey(), model: model(), pdfBase64: pdfToBase64(buf), fetchImpl: ctx.fetchImpl, signal: ctl.signal }); }
+      const instr = { project: S.cur?.id === pid ? (S.cur.data?.meta?.exInstr || '') : '', article: S.cur?.studies?.[sid]?.instr || '' };
+      try { out = await callClaude({ apiKey: apiKey(), model: model(), pdfBase64: pdfToBase64(buf), instr, fetchImpl: ctx.fetchImpl, signal: ctl.signal }); }
       finally { clearTimeout(timer); }
       const { study, outcomes } = out.result;
       const oc = {};
       outcomes.forEach((o, i) => { oc[newId('o')] = { ...o, order: Date.now() + i }; });
-      const patch = { status: 'extracted', error: '', fields: study, outcomes: oc, verified: false, verifiedBy: '', model: out.model, extractedAt: fb.serverTimestamp() };
+      const patch = { status: 'extracted', error: '', fields: study, outcomes: oc, verified: false, verifiedBy: '', model: out.model, extractedAt: fb.serverTimestamp(), instrUsed: [instr.project && `Revisión: ${instr.project}`, instr.article && `Artículo: ${instr.article}`].filter(Boolean).join('\n').slice(0, 6200) };
       if (replace) for (const oid of Object.keys(S.cur?.studies?.[sid]?.outcomes || {})) if (!(oid in oc)) oc[oid] = fb.deleteField();
       const guess = study.authors_year?.v;
       if (guess && (!S.cur?.studies?.[sid]?.label || S.cur.studies[sid].label === file.name.replace(/\.pdf$/i, ''))) patch.label = guess;
@@ -143,6 +144,16 @@ export function initExtraction(ctx) {
       <p class="muted sm" id="ex-keystate">${has ? 'Clave guardada en este navegador.' : 'Aún no hay clave. Créala en console.anthropic.com → API keys, y fija un límite de gasto mensual.'} No uses esto en ordenadores compartidos.</p></section>`;
   }
 
+  function instrHtml() {
+    const ro = canEdit() ? '' : 'disabled';
+    const val = S.cur.data?.meta?.exInstr || '';
+    if (!canEdit() && !val) return '';
+    return `<section class="card" id="ex-instr"><h2>Instrucciones de extracción de la revisión</h2>
+      <p class="muted sm">Dile a la IA <b>qué debe extraer</b> en esta revisión: la pregunta, las comparaciones de interés, los desenlaces y momentos de medida, y qué ignorar. Se aplican a <b>todos los artículos que extraigas a partir de ahora</b> (los ya extraídos no cambian hasta que pulses «Volver a extraer»). Las reglas de rigor (no inventar ni calcular datos) no se pueden desactivar.</p>
+      <textarea data-meta="exInstr" rows="4" maxlength="3000" ${ro} placeholder="Ejemplo: Pregunta de la revisión: implantes frente a prótesis fija en pacientes edéntulos. Extrae solo la comparación implante (intervención) vs prótesis fija (control); ignora los grupos sin tratamiento. Desenlaces: supervivencia, pérdida ósea marginal (mm) y complicaciones, a 1, 3 y 5 años.">${esc(val)}</textarea>
+      <p class="muted sm">Se comparte con todo el equipo. Si dejas esto vacío, la IA extrae las comparaciones de cada grupo de intervención frente al control.</p></section>`;
+  }
+
   function listHtml() {
     const rows = studies();
     const ro = canEdit();
@@ -159,7 +170,7 @@ export function initExtraction(ctx) {
 
   function renderExtraction() {
     if (S.exOpen && !S.cur.studies[S.exOpen]) S.exOpen = null;
-    $('#tab-body').innerHTML = `<div id="ex-root">${canEdit() ? connHtml() : ''}<div id="ex-list">${listHtml()}</div><div id="ex-detail"></div></div>`;
+    $('#tab-body').innerHTML = `<div id="ex-root">${canEdit() ? connHtml() : ''}${instrHtml()}<div id="ex-list">${listHtml()}</div><div id="ex-detail"></div></div>`;
     paintDetail(true);
   }
 
@@ -170,7 +181,7 @@ export function initExtraction(ctx) {
     paintDetail(false);
   }
 
-  const detailSig = (s) => [s.status, s.verified, outcomesOf(s).map((o) => o.id).join(',')].join('|');
+  const detailSig = (s) => [s.status, s.verified, !!s.instrUsed, outcomesOf(s).map((o) => o.id).join(',')].join('|');
 
   function paintDetail(force) {
     const box = $('#ex-detail');
@@ -212,6 +223,9 @@ export function initExtraction(ctx) {
         <datalist id="ex-outnames">${names.map((n) => `<option value="${esc(n)}">`).join('')}</datalist>
         <div class="olist">${orows || '<p class="muted">Sin desenlaces.</p>'}</div>
         ${ro ? '' : `<div class="row"><button class="btn" data-act="ex-add-o">+ Añadir fila de desenlace</button></div>`}
+        ${ro && !s.instrUsed ? '' : `<div class="card-sub"><label>Instrucciones solo para este artículo <span class="muted sm">(se aplican al pulsar «Volver a extraer»; se suman a las de la revisión)</span>
+          <textarea data-ex="instr" rows="2" maxlength="3000" ${ro} placeholder="Ejemplo: en este artículo extrae también el grupo de prótesis removible como comparador y usa solo la tabla 4.">${esc(s.instr || '')}</textarea></label>
+          ${s.instrUsed ? `<p class="muted sm">Última extracción hecha con estas instrucciones:<br><i>${esc(s.instrUsed).replace(/\n/g, '<br>')}</i></p>` : ''}</div>`}
         <div class="row" style="margin-top:.8rem">
           ${ro ? '' : `<label class="chk"><input type="checkbox" data-ex="verified" ${s.verified ? 'checked' : ''} ${s.status !== 'extracted' ? 'disabled' : ''}> He comprobado estos datos con el artículo original</label>
           <span class="grow"></span><input type="file" id="ex-refile" accept="application/pdf,.pdf" hidden><button class="btn sm" data-act="ex-reextract">Volver a extraer (subir PDF)…</button>`}
@@ -220,11 +234,13 @@ export function initExtraction(ctx) {
       if (keep?.oid && keep.o) $(`[data-oid="${keep.oid}"] [data-o="${keep.o}"]`, box)?.focus();
       else if (keep?.fid) $(`[data-fid="${keep.fid}"]`, box)?.focus();
       else if (keep?.ex === 'label') $('[data-ex="label"]', box)?.focus();
+      else if (keep?.ex === 'instr') $('[data-ex="instr"]', box)?.focus();
       return;
     }
     // misma estructura: solo actualizar valores que no se están editando
     const setv = (el, v) => { if (el && document.activeElement !== el && el.value !== v) el.value = v; };
     setv($('[data-ex="label"]', box), s.label || '');
+    setv($('[data-ex="instr"]', box), s.instr || '');
     $$('[data-fid]', box).forEach((el) => setv(el, s.fields?.[el.dataset.fid]?.v || ''));
     $$('[data-oid]', box).forEach((tr) => {
       const o = s.outcomes?.[tr.dataset.oid] || {};
@@ -400,6 +416,7 @@ export function initExtraction(ctx) {
     const sid = S.exOpen;
     if (!sid || !canEdit()) return;
     if (t.dataset.ex === 'label') return edit(sid, ['label'], t.value);
+    if (t.dataset.ex === 'instr') return edit(sid, ['instr'], t.value);
     if (t.dataset.ex === 'field') return edit(sid, ['fields', t.dataset.fid, 'v'], t.value);
     const tr = t.closest('[data-oid]');
     if (tr && t.dataset.o) {

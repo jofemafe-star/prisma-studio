@@ -161,3 +161,5 @@ label.of input.n { width: 76px; text-align: right; }
 label.of.grow2 { flex: 2 1 160px; } label.of.w140 { flex: 0 0 140px; } label.of.w80 { flex: 0 0 80px; }
 .ocard > label.of { display: block; }
 .ocard > label.of > span { display: block; margin-bottom: .1rem; }
+.card-sub { margin-top: .8rem; padding-top: .6rem; border-top: 1px dashed var(--line); }
+#ex-instr textarea, .card-sub textarea { width: 100%; }

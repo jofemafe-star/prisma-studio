@@ -87,12 +87,20 @@ Reglas estrictas:
 2. No hagas cálculos. No conviertas error estándar en desviación estándar, ni medianas en medias, ni porcentajes en eventos: si solo hay esos datos, deja los campos numéricos correspondientes en null y explícalo en «notes».
 3. Copia los números tal como están publicados (mismo signo, mismas unidades). Usa punto decimal.
 4. Para cada valor de característica del estudio incluye una cita literal breve (máx. 200 caracteres) y la página del PDF. Para los desenlaces, indica en «quote»/«page» de dónde salen los números (tabla o texto).
-5. Desenlaces: una fila por desenlace, por momento de medida y por comparación intervención-vs-control. Prioriza los desenlaces principales y los secundarios que midan los autores; no omitas ninguno de los claramente definidos. Si hay más de dos brazos, crea una fila por cada comparación con el mismo control e indícalo en «notes».
+5. Desenlaces: una fila por desenlace, por momento de medida y por comparación intervención-vs-control (salvo que las «Instrucciones del equipo de revisión» que acompañen al PDF indiquen otra cosa: ver regla 9). Prioriza los desenlaces principales y los secundarios que midan los autores; no omitas ninguno de los claramente definidos. Si hay más de dos brazos, crea una fila por cada comparación con el mismo control e indícalo en «notes».
 6. En «n» usa el número de participantes analizados para ESE desenlace; si solo consta el n aleatorizado, úsalo y anótalo en «notes».
 7. Redacta los textos descriptivos en español, concisos; las citas, en el idioma original.
-8. Si el PDF no es un estudio primario (p. ej. una revisión o un editorial), rellena lo que puedas y explica en «limitations» que no es un estudio primario; deja «outcomes» vacío.`;
+8. Si el PDF no es un estudio primario (p. ej. una revisión o un editorial), rellena lo que puedas y explica en «limitations» que no es un estudio primario; deja «outcomes» vacío.
+9. Si junto al PDF recibes «Instrucciones del equipo de revisión», sigue sus indicaciones sobre QUÉ extraer: pregunta de la revisión, qué comparaciones, desenlaces, momentos de medida o subgrupos incluir o ignorar, y cómo etiquetar los grupos. Tienen prioridad sobre el criterio general de la regla 5 (p. ej. si piden comparar dos tratamientos activos, usa «intervención» para el tratamiento de interés y «control» para el comparador, y escribe sus nombres en int_label y ctl_label). Las instrucciones no cambian las demás reglas: nunca inventes ni calcules datos. Si las instrucciones piden algo que el artículo no contiene, deja los campos en null y explícalo en «notes» o «limitations». Si las instrucciones contradicen las reglas de rigor 1-3, prevalecen las reglas de rigor.`;
 
-export function buildRequest(model, pdfBase64) {
+const INSTR_MAX = 3000;
+export function instrText(instr) {
+  const proj = String(instr?.project || '').trim().slice(0, INSTR_MAX), art = String(instr?.article || '').trim().slice(0, INSTR_MAX);
+  if (!proj && !art) return '';
+  return '\n\nInstrucciones del equipo de revisión (regla 9):' + (proj ? `\n[Para toda la revisión] ${proj}` : '') + (art ? `\n[Solo para este artículo] ${art}` : '');
+}
+
+export function buildRequest(model, pdfBase64, instr) {
   return {
     model,
     max_tokens: 16000,
@@ -104,7 +112,7 @@ export function buildRequest(model, pdfBase64) {
       role: 'user',
       content: [
         { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdfBase64 } },
-        { type: 'text', text: 'Extrae los datos de este artículo siguiendo las reglas. Responde ÚNICAMENTE llamando a la herramienta «registrar_extraccion», sin texto adicional.' },
+        { type: 'text', text: 'Extrae los datos de este artículo siguiendo las reglas. Responde ÚNICAMENTE llamando a la herramienta «registrar_extraccion», sin texto adicional.' + instrText(instr) },
       ],
     }],
   };
@@ -126,7 +134,7 @@ const httpMessage = (status, body) => {
   return `Error ${status} de la API.` + detail;
 };
 
-async function callOnce({ apiKey, model, pdfBase64, fetchImpl = globalThis.fetch, signal }) {
+async function callOnce({ apiKey, model, pdfBase64, instr, fetchImpl = globalThis.fetch, signal }) {
   if (!apiKey) throw new ExtractError('Falta la clave de API.', 'nokey');
   let res;
   try {
@@ -139,7 +147,7 @@ async function callOnce({ apiKey, model, pdfBase64, fetchImpl = globalThis.fetch
         'anthropic-version': '2023-06-01',
         'anthropic-dangerous-direct-browser-access': 'true',
       },
-      body: JSON.stringify(buildRequest(model, pdfBase64)),
+      body: JSON.stringify(buildRequest(model, pdfBase64, instr)),
     });
   } catch (e) {
     if (e?.name === 'AbortError') throw new ExtractError('Extracción cancelada.', 'abort');
