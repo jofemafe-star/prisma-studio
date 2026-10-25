@@ -188,16 +188,20 @@ export function initExtraction(ctx) {
           ${x.q ? `<div class="quote">«${esc(x.q)}»${x.p ? ` · p. ${esc(x.p)}` : ''}</div>` : ''}</td></tr>`;
       }).join('');
       const names = [...new Set(studies().flatMap((st) => outcomesOf(st).map((o) => o.outcome)).filter(Boolean))];
-      const num = (o, k) => `<td><input class="n" data-o="${k}" inputmode="decimal" value="${esc(showNum(o[k]))}" ${ro}></td>`;
-      const txt = (o, k, w = '') => `<td><input data-o="${k}" ${k === 'outcome' ? 'list="ex-outnames"' : ''} value="${esc(o[k] || '')}" ${ro} style="${w}"></td>`;
-      const orows = outcomesOf(s).map((o) => `<tr data-oid="${o.id}">${txt(o, 'outcome', 'min-width:150px')}${txt(o, 'timepoint', 'min-width:90px')}
-        <td><select data-o="type" ${ro}><option value="continuous" ${o.type === 'continuous' ? 'selected' : ''}>continuo</option><option value="dichotomous" ${o.type === 'dichotomous' ? 'selected' : ''}>dicotómico</option><option value="other" ${!['continuous', 'dichotomous'].includes(o.type) ? 'selected' : ''}>otro</option></select></td>
-        ${txt(o, 'int_label', 'min-width:90px')}${num(o, 'int_n')}${num(o, 'int_mean')}${num(o, 'int_sd')}${num(o, 'int_events')}
-        ${txt(o, 'ctl_label', 'min-width:90px')}${num(o, 'ctl_n')}${num(o, 'ctl_mean')}${num(o, 'ctl_sd')}${num(o, 'ctl_events')}
-        ${txt(o, 'effect_measure', 'width:60px')}${num(o, 'effect')}${num(o, 'ci_low')}${num(o, 'ci_high')}${num(o, 'p_value')}
-        ${txt(o, 'notes', 'min-width:160px')}
-        <td class="muted sm" title="${esc(o.quote || '')}">${o.page ? 'p. ' + esc(o.page) : ''}${o.quote ? ' ⓘ' : ''}</td>
-        <td>${ro ? '' : `<button class="btn sm danger" data-act="ex-rm-o" data-row="${o.id}" title="Quitar fila">×</button>`}</td></tr>`).join('');
+      const num = (o, k, lbl) => `<label class="of"><span>${lbl}</span><input class="n" data-o="${k}" inputmode="decimal" value="${esc(showNum(o[k]))}" ${ro}></label>`;
+      const txt = (o, k, lbl, cls = '') => `<label class="of ${cls}"><span>${lbl}</span><input data-o="${k}" ${k === 'outcome' ? 'list="ex-outnames"' : ''} value="${esc(o[k] || '')}" ${ro}></label>`;
+      const orows = outcomesOf(s).map((o, i) => `<div class="ocard" data-oid="${o.id}">
+        <div class="ohead"><span class="onum">${i + 1}</span>${txt(o, 'outcome', 'Desenlace', 'grow2')}${txt(o, 'timepoint', 'Momento', 'w140')}
+          <label class="of w140"><span>Tipo</span><select data-o="type" ${ro}><option value="continuous" ${o.type === 'continuous' ? 'selected' : ''}>continuo</option><option value="dichotomous" ${o.type === 'dichotomous' ? 'selected' : ''}>dicotómico</option><option value="other" ${!['continuous', 'dichotomous'].includes(o.type) ? 'selected' : ''}>otro</option></select></label>
+          ${ro ? '' : `<button class="btn sm danger" data-act="ex-rm-o" data-row="${o.id}" title="Quitar este desenlace">×</button>`}</div>
+        <div class="ogroups">
+          <div class="ogrp"><b>Intervención</b><div class="ofl">${txt(o, 'int_label', 'Grupo', 'grow2')}${num(o, 'int_n', 'n')}${num(o, 'int_mean', 'Media')}${num(o, 'int_sd', 'DE')}${num(o, 'int_events', 'Eventos')}</div></div>
+          <div class="ogrp"><b>Control</b><div class="ofl">${txt(o, 'ctl_label', 'Grupo', 'grow2')}${num(o, 'ctl_n', 'n')}${num(o, 'ctl_mean', 'Media')}${num(o, 'ctl_sd', 'DE')}${num(o, 'ctl_events', 'Eventos')}</div></div>
+          <div class="ogrp"><b>Efecto publicado</b><div class="ofl">${txt(o, 'effect_measure', 'Medida', 'w80')}${num(o, 'effect', 'Efecto')}${num(o, 'ci_low', 'IC inf.')}${num(o, 'ci_high', 'IC sup.')}${num(o, 'p_value', 'p')}</div></div>
+        </div>
+        <label class="of"><span>Notas</span><textarea rows="1" data-o="notes" ${ro}>${esc(o.notes || '')}</textarea></label>
+        ${o.quote || o.page ? `<div class="quote">Origen${o.page ? ' (p. ' + esc(o.page) + ')' : ''}: ${o.quote ? '«' + esc(o.quote) + '»' : ''}</div>` : ''}
+      </div>`).join('');
       box.innerHTML = `<section class="card"><div class="head"><h2>${esc(s.label || s.fileName)}</h2><span>${statusBadge(s)}</span></div>
         ${s.status === 'error' ? `<div class="warn">⚠ ${esc(s.error)}</div>` : ''}
         ${s.status === 'extracting' || s.status === 'queued' ? '<p class="muted">La IA está leyendo el artículo… puedes seguir trabajando; los datos aparecerán aquí al terminar.</p>' : ''}
@@ -206,8 +210,7 @@ export function initExtraction(ctx) {
         <h3>Desenlaces <span class="muted sm">(una fila por desenlace, momento y comparación)</span></h3>
         <p class="muted sm">Usa el <b>mismo nombre</b> de desenlace en todos los estudios para poder compararlos (te sugiere los ya usados). Medias y DE para variables continuas; eventos y n para dicotómicas; efecto + IC cuando solo se publica eso.</p>
         <datalist id="ex-outnames">${names.map((n) => `<option value="${esc(n)}">`).join('')}</datalist>
-        <div class="tablewrap"><table class="tbl wide"><thead><tr><th>Desenlace</th><th>Momento</th><th>Tipo</th><th>Grupo interv.</th><th>n</th><th>Media</th><th>DE</th><th>Eventos</th><th>Grupo control</th><th>n</th><th>Media</th><th>DE</th><th>Eventos</th><th>Medida</th><th>Efecto</th><th>IC inf.</th><th>IC sup.</th><th>p</th><th>Notas</th><th>Origen</th><th></th></tr></thead>
-        <tbody>${orows || '<tr><td colspan="21" class="muted">Sin desenlaces.</td></tr>'}</tbody></table></div>
+        <div class="olist">${orows || '<p class="muted">Sin desenlaces.</p>'}</div>
         ${ro ? '' : `<div class="row"><button class="btn" data-act="ex-add-o">+ Añadir fila de desenlace</button></div>`}
         <div class="row" style="margin-top:.8rem">
           ${ro ? '' : `<label class="chk"><input type="checkbox" data-ex="verified" ${s.verified ? 'checked' : ''} ${s.status !== 'extracted' ? 'disabled' : ''}> He comprobado estos datos con el artículo original</label>
