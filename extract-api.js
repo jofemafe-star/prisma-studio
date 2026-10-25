@@ -98,12 +98,13 @@ export function buildRequest(model, pdfBase64) {
     max_tokens: 16000,
     system: SYSTEM_PROMPT,
     tools: [buildTool()],
-    tool_choice: { type: 'tool', name: 'registrar_extraccion' },
+    // Los modelos 5.x no admiten forzar la herramienta (tool_choice any/tool → error 400): se usa auto y se exige en el texto.
+    tool_choice: { type: 'auto' },
     messages: [{
       role: 'user',
       content: [
         { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdfBase64 } },
-        { type: 'text', text: 'Extrae los datos de este artículo siguiendo las reglas.' },
+        { type: 'text', text: 'Extrae los datos de este artículo siguiendo las reglas. Responde ÚNICAMENTE llamando a la herramienta «registrar_extraccion», sin texto adicional.' },
       ],
     }],
   };
@@ -125,7 +126,7 @@ const httpMessage = (status, body) => {
   return `Error ${status} de la API.` + detail;
 };
 
-export async function callClaude({ apiKey, model, pdfBase64, fetchImpl = globalThis.fetch, signal }) {
+async function callOnce({ apiKey, model, pdfBase64, fetchImpl = globalThis.fetch, signal }) {
   if (!apiKey) throw new ExtractError('Falta la clave de API.', 'nokey');
   let res;
   try {
@@ -203,4 +204,14 @@ export async function ping({ apiKey, model, fetchImpl = globalThis.fetch }) {
   try { body = await res.json(); } catch { /* sin cuerpo */ }
   if (!res.ok) throw new ExtractError(httpMessage(res.status, body), 'http' + res.status);
   return true;
+}
+
+export async function callClaude(args) {
+  try {
+    return await callOnce(args);
+  } catch (e) {
+    // Con tool_choice auto el modelo puede, raramente, contestar con texto: se reintenta una vez.
+    if (e?.code === 'noresult') return await callOnce(args);
+    throw e;
+  }
 }
