@@ -163,3 +163,8 @@ label.of.grow2 { flex: 2 1 160px; } label.of.w140 { flex: 0 0 140px; } label.of.
 .ocard > label.of > span { display: block; margin-bottom: .1rem; }
 .card-sub { margin-top: .8rem; padding-top: .6rem; border-top: 1px dashed var(--line); }
 #ex-instr textarea, .card-sub textarea { width: 100%; }
+/* ---- Armonización de desenlaces ---- */
+.hcard { border: 1px solid var(--line); border-radius: 10px; padding: .55rem .7rem; margin: .5rem 0; background: var(--bg); }
+.hhead { display: flex; flex-wrap: wrap; gap: .6rem; align-items: flex-end; }
+.hhead .chk { padding-bottom: .35rem; }
+.hmem { margin-top: .35rem; display: flex; flex-direction: column; gap: .1rem; }

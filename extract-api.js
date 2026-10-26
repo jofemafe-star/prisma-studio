@@ -223,3 +223,104 @@ export async function callClaude(args) {
     throw e;
   }
 }
+
+/* ======================= Armonización de desenlaces (solo texto, sin PDF) ======================= */
+export const HARMONIZE_MAX_ITEMS = 250;
+
+export function harmonizeTool() {
+  return {
+    name: 'proponer_armonizacion',
+    description: 'Propone cómo agrupar los desenlaces extraídos de distintos estudios bajo nombres y momentos unificados.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        groups: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              name: { type: 'string', description: 'Nombre unificado del desenlace, corto y en español (p. ej. «Pérdida ósea marginal»)' },
+              timepoint: { type: 'string', description: 'Momento de medida unificado (p. ej. «1 año»); cadena vacía si no consta' },
+              members: { type: 'array', items: { type: 'integer' }, description: 'Índices (campo i) de las filas que pertenecen a este grupo' },
+              combinable: { type: 'boolean', description: 'false si las filas del grupo parecen medir cosas distintas (otra escala, método, definición o población) y no deberían combinarse sin revisión' },
+              confidence: { type: 'string', enum: ['alta', 'media', 'baja'] },
+              concern: { type: 'string', description: 'Si combinable es false o la confianza no es alta: motivo concreto, en una frase. Si no hay dudas, cadena vacía.' },
+            },
+            required: ['name', 'timepoint', 'members', 'combinable', 'confidence', 'concern'],
+          },
+        },
+      },
+      required: ['groups'],
+    },
+  };
+}
+
+export const HARMONIZE_PROMPT = `Eres un asistente metodológico para revisiones sistemáticas. Recibes una lista numerada de filas de desenlaces extraídas de varios estudios (campo i = índice) y debes agruparlas llamando a la herramienta «proponer_armonizacion».
+
+Reglas:
+1. Agrupa las filas que miden el MISMO desenlace en el MISMO momento de medida. Un grupo = un desenlace + un momento. Si un desenlace se mide en varios momentos, haz un grupo por momento.
+2. Una fila pertenece exactamente a un grupo. Incluye todas las filas; las que no tengan pareja forman un grupo de un solo miembro conservando su nombre y momento.
+3. Una misma fila de estudio con comparaciones distintas (varios grupos de intervención) puede aparecer en el mismo grupo: es normal.
+4. Unifica nombres en español, concisos y sin siglas innecesarias. Unifica momentos solo si son equivalentes (12 meses = 1 año; 6 semanas = 1,5 meses no se unifica con 2 meses). Si el momento no consta, deja cadena vacía.
+5. Marca combinable = false y explica el motivo en «concern» cuando, por los datos de las filas (tipo, medida de efecto, notas, citas, nombres de grupo), parezcan medir cosas distintas: otra escala o unidad, distinto método de medida (p. ej. radiografía frente a TAC), otra definición del evento, otra población o direcciones opuestas (mayor es mejor / peor). Si tienes dudas razonables, usa confianza media o baja.
+6. No inventes información que no esté en las filas. Ante la duda, no unas: es preferible dos grupos que uno erróneo.
+7. Si recibes «Contexto de la revisión», úsalo para decidir qué es relevante, pero no descartes filas.`;
+
+export function buildHarmonizeRequest(model, items, context) {
+  const lines = items.map((it) => JSON.stringify(it)).join('\n');
+  return {
+    model,
+    max_tokens: 16000,
+    system: HARMONIZE_PROMPT,
+    tools: [harmonizeTool()],
+    tool_choice: { type: 'auto' },
+    messages: [{ role: 'user', content: `${context ? `Contexto de la revisión: ${String(context).trim().slice(0, 3000)}\n\n` : ''}Filas de desenlaces (una por línea, JSON):\n${lines}\n\nAgrúpalas llamando ÚNICAMENTE a la herramienta «proponer_armonizacion», sin texto adicional.` }],
+  };
+}
+
+// Limpia la respuesta: índices válidos, sin repetidos y con todas las filas cubiertas.
+export function normalizeHarmonization(input, items) {
+  const n = items.length, used = new Set(), groups = [];
+  for (const g of Array.isArray(input?.groups) ? input.groups : []) {
+    if (!g || typeof g !== 'object') continue;
+    const members = [...new Set((Array.isArray(g.members) ? g.members : []).map(Number).filter((i) => Number.isInteger(i) && i >= 0 && i < n && !used.has(i)))];
+    if (!members.length) continue;
+    members.forEach((i) => used.add(i));
+    const conf = ['alta', 'media', 'baja'].includes(g.confidence) ? g.confidence : 'media';
+    groups.push({
+      name: str(g.name, 200) || items[members[0]].outcome,
+      timepoint: str(g.timepoint, 100),
+      members, combinable: g.combinable !== false, confidence: conf, concern: str(g.concern, 500),
+    });
+  }
+  for (let i = 0; i < n; i++) if (!used.has(i)) groups.push({ name: items[i].outcome, timepoint: items[i].timepoint || '', members: [i], combinable: true, confidence: 'alta', concern: '' });
+  return groups;
+}
+
+async function harmonizeOnce({ apiKey, model, items, context, fetchImpl = globalThis.fetch, signal }) {
+  if (!apiKey) throw new ExtractError('Falta la clave de API.', 'nokey');
+  let res;
+  try {
+    res = await fetchImpl(API_URL, {
+      method: 'POST', signal,
+      headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+      body: JSON.stringify(buildHarmonizeRequest(model, items, context)),
+    });
+  } catch (e) {
+    if (e?.name === 'AbortError') throw new ExtractError('Análisis cancelado.', 'abort');
+    throw new ExtractError('No se pudo conectar con la API (¿sin internet o bloqueada por un cortafuegos/extensión?).', 'network');
+  }
+  let body = null;
+  try { body = await res.json(); } catch { /* sin cuerpo */ }
+  if (!res.ok) throw new ExtractError(httpMessage(res.status, body), 'http' + res.status);
+  if (body?.stop_reason === 'max_tokens') throw new ExtractError('La respuesta se cortó por longitud: hay demasiados desenlaces para analizar de una vez.', 'truncated');
+  const block = (body?.content || []).find((b) => b.type === 'tool_use' && b.name === 'proponer_armonizacion');
+  if (!block?.input || typeof block.input !== 'object') throw new ExtractError('La IA no devolvió una propuesta estructurada. Reintenta.', 'noresult');
+  return { groups: normalizeHarmonization(block.input, items), usage: body.usage || null, model: body.model || model };
+}
+
+export async function harmonize(args) {
+  if (!args.items?.length) throw new ExtractError('No hay desenlaces que armonizar.', 'empty');
+  if (args.items.length > HARMONIZE_MAX_ITEMS) throw new ExtractError(`Hay ${args.items.length} filas de desenlaces; el máximo para analizar de una vez es ${HARMONIZE_MAX_ITEMS}.`, 'toomany');
+  try { return await harmonizeOnce(args); } catch (e) { if (e?.code === 'noresult') return await harmonizeOnce(args); throw e; }
+}

@@ -1,6 +1,6 @@
 // Pestañas «Extracción» y «Comparación»: estudios, extracción con IA (PDF), verificación manual,
 // tablas comparativas y viabilidad del metaanálisis.
-import { STUDY_FIELDS, OUTCOME_NUM, MODELS, MAX_PDF_BYTES, callClaude, pdfToBase64, ping, ExtractError } from './extract-api.js';
+import { STUDY_FIELDS, OUTCOME_NUM, MODELS, MAX_PDF_BYTES, callClaude, pdfToBase64, ping, ExtractError, harmonize } from './extract-api.js';
 import { assess, MEASURES, back, fmtNum, normKey } from './meta.js';
 
 const KEY_LS = 'prisma.apikey', MODEL_LS = 'prisma.model';
@@ -251,6 +251,100 @@ export function initExtraction(ctx) {
     });
   }
 
+
+  /* ------------------- armonización de desenlaces con IA (solo texto) ------------------- */
+  const harm = { status: 'idle', groups: [], items: [], refs: [], msg: '', cur: null };
+  const harmReset = () => { harm.status = 'idle'; harm.groups = []; harm.items = []; harm.refs = []; harm.msg = ''; harm.cur = null; };
+
+  function harmItems() {
+    const items = [], refs = [];
+    for (const s of studies()) {
+      if (s.status !== 'extracted') continue;
+      for (const o of outcomesOf(s)) {
+        if (!o.outcome) continue;
+        refs.push({ sid: s.id, oid: o.id });
+        items.push({ i: items.length, study: s.label || s.fileName || '', outcome: o.outcome, timepoint: o.timepoint || '', type: o.type || '', effect_measure: o.effect_measure || '', intervention: o.int_label || '', control: o.ctl_label || '', notes: String(o.notes || '').slice(0, 300), source: String(o.quote || '').slice(0, 200) });
+      }
+    }
+    return { items, refs };
+  }
+  const harmChanged = (g) => g.members.some((i) => harm.items[i].outcome !== g.name.trim() || (harm.items[i].timepoint || '') !== g.timepoint.trim());
+  const harmCount = () => harm.groups.filter((g) => g.apply && g.name.trim()).length;
+
+  async function runHarm() {
+    if (!canEdit()) return;
+    if (!apiKey()) { toast('Primero guarda tu clave de API en la pestaña «Extracción».', 'err'); return; }
+    const { items, refs } = harmItems();
+    if (!items.length) { toast('No hay desenlaces extraídos que armonizar.', 'err'); return; }
+    const cur = S.cur;
+    harmReset(); harm.status = 'running'; harm.cur = cur.id; renderCompare();
+    try {
+      const out = await harmonize({ apiKey: apiKey(), model: model(), items, context: cur.data?.meta?.exInstr || '', fetchImpl: ctx.fetchImpl });
+      if (S.cur !== cur) return;
+      harm.items = items; harm.refs = refs;
+      harm.groups = out.groups.map((g) => { const x = { ...g }; x.apply = false; return x; });
+      harm.groups.forEach((g) => { g.apply = harmChanged(g) && g.combinable && g.confidence !== 'baja'; });
+      harm.status = 'review';
+    } catch (e) {
+      if (S.cur !== cur) return;
+      harm.status = 'error'; harm.msg = e instanceof ExtractError ? e.message : (e?.message || String(e));
+    }
+    if (S.tab === 'compare') renderCompare();
+  }
+
+  async function applyHarm() {
+    if (!canEdit() || harm.status !== 'review') return;
+    const byStudy = {}; let n = 0;
+    for (const g of harm.groups) {
+      const name = g.name.trim(); if (!g.apply || !name) continue;
+      const tp = g.timepoint.trim();
+      for (const i of g.members) {
+        const { sid, oid } = harm.refs[i]; const o = S.cur.studies[sid]?.outcomes?.[oid]; if (!o) continue;
+        const patch = { outcome: name, timepoint: tp };
+        if (!('origOutcome' in o) && (o.outcome || '') !== name) patch.origOutcome = o.outcome || '';
+        if (!('origTimepoint' in o) && (o.timepoint || '') !== tp) patch.origTimepoint = o.timepoint || '';
+        const tag = g.concern ? `[Armonización IA: ${g.concern}]` : '';
+        if (tag && !String(o.notes || '').includes(tag)) patch.notes = (o.notes ? o.notes + ' ' : '') + tag;
+        (byStudy[sid] ||= {})[oid] = patch; n++;
+      }
+    }
+    if (!n) { toast('No hay ningún grupo seleccionado para aplicar.', 'err'); return; }
+    for (const [sid, os] of Object.entries(byStudy)) for (const [oid, patch] of Object.entries(os)) Object.assign(S.cur.studies[sid].outcomes[oid], patch);
+    setSaving('saving');
+    try { await Promise.all(Object.entries(byStudy).map(([sid, os]) => write(sid, { outcomes: os }))); setSaving('saved'); }
+    catch (e) { setSaving('error', e); return; }
+    toast(`Armonizados ${n} desenlaces.`, 'ok');
+    harmReset(); renderCompare();
+  }
+
+  function harmHtml() {
+    if (!canEdit()) return '';
+    const head = '<h2>Armonizar desenlaces con IA</h2>';
+    const intro = '<p class="muted sm">La IA lee la lista de desenlaces ya extraídos (solo texto, sin los PDF; cuesta céntimos) y propone qué filas de distintos estudios miden lo mismo, con un nombre y un momento unificados. <b>No cambia nada hasta que revises la propuesta y pulses «Aplicar».</b> Los casos dudosos (otra escala, método o definición) se marcan como no combinables.</p>';
+    if (harm.status === 'running') return `<section class="card" id="harm">${head}<p class="muted">Analizando los desenlaces… puede tardar unos segundos.</p></section>`;
+    if (harm.status === 'error') return `<section class="card" id="harm">${head}<div class="warn">⚠ ${esc(harm.msg)}</div><div class="row"><button class="btn" data-act="harm-run">Reintentar</button></div></section>`;
+    if (harm.status === 'review') {
+      const rel = [], solo = [];
+      harm.groups.forEach((g, gi) => { const nSt = new Set(g.members.map((i) => harm.refs[i].sid)).size; (g.members.length >= 2 || harmChanged(g) || g.concern || !g.combinable ? rel : solo).push({ g, gi, nSt }); });
+      rel.sort((a, b) => b.nSt - a.nSt);
+      const badge = (g) => `${harmChanged(g) ? '' : '<span class="badge">ya unificado</span> '}<span class="badge ${g.confidence === 'alta' ? 'b-ok' : g.confidence === 'media' ? 'b-warn' : 'b-err'}">confianza ${g.confidence}</span>${g.combinable ? '' : ' <span class="badge b-err">no combinable sin revisar</span>'}`;
+      const cards = rel.map(({ g, gi, nSt }) => `<div class="hcard" data-gi="${gi}">
+        <div class="hhead"><label class="chk"><input type="checkbox" data-h="apply" ${g.apply ? 'checked' : ''}> Aplicar</label>
+          <label class="of grow2"><span>Desenlace unificado</span><input data-h="name" value="${esc(g.name)}" maxlength="200"></label>
+          <label class="of w140"><span>Momento unificado</span><input data-h="tp" value="${esc(g.timepoint)}" maxlength="100"></label>
+          <span>${badge(g)}</span></div>
+        ${g.concern ? `<div class="flag f-amber">${esc(g.concern)}</div>` : ''}
+        <div class="hmem">${g.members.map((i) => { const it = harm.items[i]; return `<div class="sm"><b>${esc(it.study)}</b>: «${esc(it.outcome)}»${it.timepoint ? ' · ' + esc(it.timepoint) : ''}${it.intervention || it.control ? ` <span class="muted">(${esc(it.intervention || '—')} vs ${esc(it.control || '—')})</span>` : ''}</div>`; }).join('')}</div>
+      </div>`).join('');
+      return `<section class="card" id="harm">${head}
+        <p class="muted sm">Propuesta de la IA: <b>${rel.length}</b> grupos para revisar. Corrige nombres y momentos, desmarca los que no quieras aplicar y pulsa «Aplicar». Los nombres originales se conservan en cada fila.</p>
+        ${cards || '<p class="muted">Los desenlaces ya están unificados: no hay cambios que proponer.</p>'}
+        ${solo.length ? `<p class="muted sm"><b>Sin pareja en otros estudios:</b> ${solo.map(({ g }) => esc(harm.items[g.members[0]].study) + ': «' + esc(g.name) + '»').join('; ')}.</p>` : ''}
+        <div class="row"><button class="btn primary" data-act="harm-apply" id="harm-apply-btn">Aplicar ${harmCount()} grupos seleccionados</button><button class="btn" data-act="harm-cancel">Descartar propuesta</button></div></section>`;
+    }
+    return `<section class="card" id="harm">${head}${intro}<div class="row"><button class="btn primary" data-act="harm-run">Analizar desenlaces</button>${apiKey() ? '' : '<span class="muted sm">Necesitas guardar tu clave de API en la pestaña «Extracción».</span>'}</div></section>`;
+  }
+
   /* ------------------------------- vista: Comparación ------------------------------- */
   const OUT_LEVEL = { green: ['v-green', 'Viable'], amber: ['v-amber', 'Con cautela'], red: ['v-red', 'No viable'] };
 
@@ -353,7 +447,7 @@ export function initExtraction(ctx) {
         <p class="muted sm">Cálculo <b>orientativo</b> para decidir si compensa hacer el análisis. Para publicar, repite el análisis con R (metafor/meta) o RevMan. La decisión final de combinar depende también de la similitud clínica y metodológica de los estudios, no solo de I².</p></section>`;
     }
 
-    root.innerHTML = `<section class="card"><div class="head"><h2>Características de los estudios</h2><button class="btn sm" data-act="cmp-csv" data-kind="chars">Descargar (.csv)</button></div>
+    root.innerHTML = `${harmHtml()}<section class="card"><div class="head"><h2>Características de los estudios</h2><button class="btn sm" data-act="cmp-csv" data-kind="chars">Descargar (.csv)</button></div>
       ${unver ? `<div class="warn">⚠ ${unver} de ${sts.length} estudios aún no están verificados. Comprueba los datos con los artículos antes de sacar conclusiones.</div>` : ''}
       <div class="tablewrap"><table class="tbl wide"><thead><tr><th>Estudio</th>${STUDY_FIELDS.slice(1).map((f) => `<th>${esc(f.label)}</th>`).join('')}<th>Verif.</th></tr></thead><tbody>
       ${sts.map((s) => `<tr><td><b>${esc(s.fields?.authors_year?.v || s.label)}</b></td>${STUDY_FIELDS.slice(1).map((f) => `<td class="cell">${esc(s.fields?.[f.id]?.v || '')}</td>`).join('')}<td>${s.verified ? '✓' : ''}</td></tr>`).join('')}
@@ -397,6 +491,9 @@ export function initExtraction(ctx) {
       patchExtraction();
       await fb.deleteDoc(stRef(el.dataset.sid));
     },
+    'harm-run'() { runHarm(); },
+    'harm-apply'() { applyHarm(); },
+    'harm-cancel'() { harmReset(); renderCompare(); },
     'ex-add-o'() { if (S.exOpen) addOutcome(S.exOpen); },
     'ex-rm-o'(el) { if (S.exOpen) removeOutcome(S.exOpen, el.dataset.row); },
     'ex-reextract'() {
@@ -425,6 +522,21 @@ export function initExtraction(ctx) {
     }
   });
 
+  document.addEventListener('input', (e) => {
+    const t = e.target, h = t.dataset?.h;
+    if (!h || harm.status !== 'review') return;
+    const g = harm.groups[+t.closest('[data-gi]')?.dataset.gi]; if (!g) return;
+    if (h === 'name') g.name = t.value; else if (h === 'tp') g.timepoint = t.value;
+    const b = $('#harm-apply-btn'); if (b) b.textContent = `Aplicar ${harmCount()} grupos seleccionados`;
+  });
+  document.addEventListener('change', (e) => {
+    const t = e.target;
+    if (t.dataset?.h === 'apply' && harm.status === 'review') {
+      const g = harm.groups[+t.closest('[data-gi]')?.dataset.gi]; if (g) g.apply = t.checked;
+      const b = $('#harm-apply-btn'); if (b) b.textContent = `Aplicar ${harmCount()} grupos seleccionados`;
+      return;
+    }
+  });
   document.addEventListener('change', (e) => {
     const t = e.target;
     if (!S.cur?.shell) return;
@@ -456,5 +568,5 @@ export function initExtraction(ctx) {
     if (tr && t.dataset.o === 'type') edit(sid, ['outcomes', tr.dataset.oid, 'type'], t.value);
   });
 
-  return { subscribe, renderExtraction, renderCompare, actions, reset() { queue.length = 0; S.exOpen = null; cmp.outcome = cmp.timepoint = cmp.measure = null; } };
+  return { subscribe, renderExtraction, renderCompare, actions, reset() { harmReset(); queue.length = 0; S.exOpen = null; cmp.outcome = cmp.timepoint = cmp.measure = null; } };
 }
