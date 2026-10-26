@@ -3,6 +3,7 @@ import { fb, configured } from './firebase.js';
 import { compute, flowSvg, emptyFlow, listOf, num } from './flow.js';
 import { download, svgBlob, svgToPng, docxBlob, locOf } from './export.js';
 import { initExtraction } from './extract.js';
+import { initDiscussion } from './discuss.js';
 
 /* ============================== utilidades ============================== */
 const $ = (s, r = document) => r.querySelector(s);
@@ -73,7 +74,9 @@ function flushAll() {
 }
 
 /* módulo de extracción de datos (fase D) */
-const ex = initExtraction({ S, fb, $, $$, esc, toast, canEdit, newId, nest, setSaving, debounced, pend, download, myName, slug, fetchImpl: (...a) => fetch(...a) });
+const exCtx = { S, fb, $, $$, esc, toast, canEdit, newId, nest, setSaving, debounced, pend, download, myName, slug, fetchImpl: (...a) => fetch(...a) };
+const ex = initExtraction(exCtx);
+const dc = initDiscussion(exCtx, ex);
 
 /* ============================== plantillas ============================== */
 async function loadTemplates() {
@@ -203,7 +206,7 @@ function closeProject() {
   S.unsubProj = [];
   S.cur = null;
   for (const k of Object.keys(pend)) delete pend[k];
-  ex.reset();
+  ex.reset(); dc.reset();
 }
 
 async function openProject(pid) {
@@ -270,6 +273,7 @@ function subscribeChildren(cur, fail) {
     if (S.tab === 'flow') syncFlow();
   }, errH));
   ex.subscribe(cur, errH);
+  dc.subscribe(cur, errH);
 }
 
 function maybeSubscribeInvites(cur) {
@@ -303,7 +307,7 @@ function updateHeader() {
 }
 
 function renderShell() {
-  const tabs = [['checklist', 'Lista de verificación'], ['flow', 'Diagrama de flujo'], ['extract', 'Extracción'], ['compare', 'Comparación'], ['members', 'Miembros'], ['export', 'Exportar']];
+  const tabs = [['checklist', 'Lista de verificación'], ['flow', 'Diagrama de flujo'], ['extract', 'Extracción'], ['compare', 'Comparación'], ['discuss', 'Discusión'], ['members', 'Miembros'], ['export', 'Exportar']];
   root.innerHTML = `${topbar()}<main class="wrap">
     <div class="phead"><a href="#/" class="link">← Proyectos</a><h1 id="p-title"></h1><span id="p-role" class="badge"></span>
       <span class="grow"></span><span id="savestate" class="muted sm"></span>
@@ -319,7 +323,7 @@ function renderShell() {
 function renderTab() {
   if (!S.cur?.shell) return;
   $$('.tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === S.tab));
-  ({ checklist: renderChecklist, flow: renderFlow, extract: ex.renderExtraction, compare: ex.renderCompare, members: renderMembers, export: renderExport })[S.tab]();
+  ({ checklist: renderChecklist, flow: renderFlow, extract: ex.renderExtraction, compare: ex.renderCompare, discuss: dc.render, members: renderMembers, export: renderExport })[S.tab]();
 }
 
 /* ----------------------------- Lista de verificación ---------------------------- */
@@ -619,7 +623,7 @@ async function doExport(kind) {
   if (kind === 'png') { const p = await svgToPng(svg, 2); return download(p.blob, `${base}_flujo-PRISMA.png`); }
   if (kind === 'pdf') return printReport();
   if (kind === 'json') {
-    const data = { exportedAt: new Date().toISOString(), project: { title: d.title, guide: d.guide, meta: d.meta || {} }, checklist: cur.checklist, flow: cur.flow, studies: cur.studies };
+    const data = { exportedAt: new Date().toISOString(), project: { title: d.title, guide: d.guide, meta: d.meta || {} }, checklist: cur.checklist, flow: cur.flow, studies: cur.studies, discussion: cur.discussion || {} };
     return download(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }), `${base}_backup.json`);
   }
   // docx
@@ -728,6 +732,7 @@ const acts = {
   'del-project': delProject,
   export: (el) => doExport(el.dataset.kind),
   ...ex.actions,
+  ...dc.actions,
 };
 
 async function emailAuth(mode) {

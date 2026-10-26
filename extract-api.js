@@ -122,7 +122,7 @@ export class ExtractError extends Error {
   constructor(message, code) { super(message); this.code = code; }
 }
 
-const httpMessage = (status, body) => {
+export const httpMessage = (status, body) => {
   const detail = body?.error?.message ? ` (${body.error.message})` : '';
   if (status === 401) return 'La clave de API no es válida o ha sido revocada. Revísala en «Conexión con la IA».';
   if (status === 403) return 'La clave de API no tiene permiso para esta operación.' + detail;

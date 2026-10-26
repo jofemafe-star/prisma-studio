@@ -345,6 +345,42 @@ export function initExtraction(ctx) {
     return `<section class="card" id="harm">${head}${intro}<div class="row"><button class="btn primary" data-act="harm-run">Analizar desenlaces</button>${apiKey() ? '' : '<span class="muted sm">Necesitas guardar tu clave de API en la pestaña «Extracción».</span>'}</div></section>`;
   }
 
+
+  /* --------------- datos para la discusión (solo estudios con datos extraídos) --------------- */
+  function discussionInput() {
+    const r2 = (x) => (Number.isFinite(x) ? Math.round(x * 100) / 100 : null);
+    const sts = studies().filter((s) => s.status === 'extracted');
+    const val = (s, id) => s.fields?.[id]?.v || '';
+    const studiesOut = sts.map((s) => ({
+      label: val(s, 'authors_year') || s.label, verified: !!s.verified,
+      country: val(s, 'country'), design: val(s, 'design'), n_total: val(s, 'n_total'), population: val(s, 'population'),
+      intervention: val(s, 'intervention'), comparator: val(s, 'comparator'), follow_up: val(s, 'follow_up'),
+      funding: val(s, 'funding'), authors_conclusion: val(s, 'conclusion'), authors_limitations: val(s, 'limitations'),
+    }));
+    const lab = (r) => r.label;
+    const outcomes = groups().map((g) => {
+      const tp = modeTimepoint(g.rows);
+      const a = assess(g.rows, { timepoint: tp });
+      const pl = a.pooled, nat = (x) => r2(back(a.measure, x));
+      return {
+        outcome: g.name, timepoint: tp === '(sin especificar)' ? '' : tp, measure: a.measure, studies_combined: a.k, level: a.level, verdict: a.verdict,
+        pooled: pl && a.k >= 2 ? { random_effects: { estimate: nat(pl.random.est), ci95_low: nat(pl.random.lo), ci95_high: nat(pl.random.hi) }, fixed_effect: { estimate: nat(pl.fixed.est), ci95_low: nat(pl.fixed.lo), ci95_high: nat(pl.fixed.hi) }, I2_percent: Math.round(pl.I2), Q: r2(pl.Q), df: pl.df, p_heterogeneity: r2(pl.pQ), tau2: r2(pl.tau2) } : null,
+        alerts: a.flags.map((f) => f.text),
+        rows: g.rows.map((r) => ({
+          study: lab(r), verified: r.verified, timepoint: r.row.timepoint || '', comparison: `${r.row.int_label || '—'} vs ${r.row.ctl_label || '—'}`, type: r.row.type || '',
+          intervention: { n: r.row.int_n ?? null, mean: r.row.int_mean ?? null, sd: r.row.int_sd ?? null, events: r.row.int_events ?? null },
+          control: { n: r.row.ctl_n ?? null, mean: r.row.ctl_mean ?? null, sd: r.row.ctl_sd ?? null, events: r.row.ctl_events ?? null },
+          published_effect: { measure: r.row.effect_measure || '', value: r.row.effect ?? null, ci_low: r.row.ci_low ?? null, ci_high: r.row.ci_high ?? null, p: r.row.p_value ?? null },
+          notes: String(r.row.notes || '').slice(0, 300),
+        })),
+      };
+    });
+    // la etiqueta de cita de cada fila debe coincidir con la del estudio
+    const labelOf = new Map(sts.map((s) => [s.label || s.fileName, val(s, 'authors_year') || s.label]));
+    outcomes.forEach((o) => o.rows.forEach((r) => { r.study = labelOf.get(r.study) || r.study; }));
+    return { studies: studiesOut, outcomes };
+  }
+
   /* ------------------------------- vista: Comparación ------------------------------- */
   const OUT_LEVEL = { green: ['v-green', 'Viable'], amber: ['v-amber', 'Con cautela'], red: ['v-red', 'No viable'] };
 
@@ -568,5 +604,5 @@ export function initExtraction(ctx) {
     if (tr && t.dataset.o === 'type') edit(sid, ['outcomes', tr.dataset.oid, 'type'], t.value);
   });
 
-  return { subscribe, renderExtraction, renderCompare, actions, reset() { harmReset(); queue.length = 0; S.exOpen = null; cmp.outcome = cmp.timepoint = cmp.measure = null; } };
+  return { subscribe, renderExtraction, renderCompare, actions, discussionInput, reset() { harmReset(); queue.length = 0; S.exOpen = null; cmp.outcome = cmp.timepoint = cmp.measure = null; } };
 }

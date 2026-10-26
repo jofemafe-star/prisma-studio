@@ -156,4 +156,32 @@ export async function docxBlob(opts, D = globalThis.docx) {
   return D.Packer.toBlob(buildDocx(opts, D));
 }
 
+/** Documento Word con el borrador de la discusión. opts: { title, sections:[{title,text}], studies:[{label}], refs:[{label,citation}] } */
+export function buildDiscussionDocx(opts, D = globalThis.docx) {
+  if (!D) throw new Error('La librería docx no está cargada');
+  const { Document, Paragraph, TextRun, HeadingLevel, AlignmentType } = D;
+  const { title = '', sections = [], studies = [], refs = [] } = opts;
+  const font = 'Arial';
+  const run = (text, o = {}) => new TextRun({ text: String(text ?? ''), font, size: o.size ?? 22, bold: o.bold, italics: o.italics, color: o.color });
+  const body = (text) => String(text || '').split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean)
+    .map((p) => new Paragraph({ alignment: AlignmentType.JUSTIFIED, spacing: { after: 160, line: 300 }, children: [run(p.replace(/\s*\n\s*/g, ' '))] }));
+  const h = (text, level) => new Paragraph({ heading: level, spacing: { before: 280, after: 120 }, children: [run(text, { bold: true, size: level === HeadingLevel.HEADING_1 ? 30 : 24 })] });
+  const children = [];
+  if (title) children.push(new Paragraph({ spacing: { after: 80 }, children: [run(title, { bold: true, size: 32 })] }));
+  children.push(h('Discusión', HeadingLevel.HEADING_1));
+  for (const s of sections) { children.push(h(s.title, HeadingLevel.HEADING_2)); children.push(...body(s.text)); }
+  children.push(h('Referencias', HeadingLevel.HEADING_1));
+  children.push(new Paragraph({ spacing: { after: 100 }, children: [run('Estudios incluidos en la revisión (completar con la referencia completa según el estilo de la revista):', { italics: true, size: 20 })] }));
+  [...new Set(studies.map((x) => x.label).filter(Boolean))].forEach((l) => children.push(new Paragraph({ spacing: { after: 60 }, children: [run(l, { size: 20 })] })));
+  if (refs.length) {
+    children.push(new Paragraph({ spacing: { before: 160, after: 100 }, children: [run('Literatura de contexto aportada por los autores:', { italics: true, size: 20 })] }));
+    refs.forEach((r) => children.push(new Paragraph({ spacing: { after: 60 }, children: [run(`${r.label ? r.label + ': ' : ''}${r.citation}`, { size: 20 })] })));
+  }
+  children.push(new Paragraph({ spacing: { before: 300 }, children: [run('Nota: borrador redactado con asistencia de IA (Claude, Anthropic) a partir de datos extraídos de los estudios; debe ser revisado por los autores y su uso declarado según la política de la revista.', { italics: true, size: 18, color: '666666' })] }));
+  return new Document({ creator: 'PRISMA Studio', title: 'Discusión', sections: [{ properties: { page: { size: { width: 11906, height: 16838 }, margin: { top: 1440, bottom: 1440, left: 1440, right: 1440 } } }, children }] });
+}
+export async function discussionDocxBlob(opts, D = globalThis.docx) {
+  return D.Packer.toBlob(buildDiscussionDocx(opts, D));
+}
+
 export { listOf };
